@@ -5,6 +5,7 @@ import tensorflow as tf
 import numpy as np 
 
 from scipy.special import erfinv as ierf 
+from scipy.linalg  import sqrtm
 
 try: 
   from FixedBinInterpolator import FixedBinInterpolator 
@@ -19,11 +20,13 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
   """
 
   def __init__ (self, 
-      n_quantiles = 100, 
-      n_sample_invert = 5000, 
+      n_quantiles = 50, 
+      n_samples   = 200, 
       output_distribution='uniform', 
       default_to_inverse = False, 
       numpy_dtype = np.float32, 
+      verbose = False,
+      decorrelate = False, 
       **kwargs
     ):
     """
@@ -32,10 +35,10 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
         the number of landmarks used to discretize the cumulative 
         density function.
 
-      n_sample_invert : int (default: 5000)
-        Number of points used to sample the inverted transform.
+      n_sample : int (default: 5000)
+        Number of points used to sample the transforms.
         Larger values will result in slower evaluation but more 
-        accurate function inversion. 
+        accurate function representation and inversion. 
 
       output_distribution : string (default: 'uniform')
         Marginal distribution for the transformed data. 
@@ -45,20 +48,30 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
       dtype : numpy data type (default: np.float32)
         Data type of the expected input 
 
+      decorrelate : bool
+        If true, after the quantile transform, a linear transform is applied
+        to remove the correlation between variables 
+
       default_to_inverse : bool
         If default_to_inverse is True, and inverse is explicitely specified
         when applying the layer. 
     """
 
     self._Nbins             = n_quantiles
-    self._Ninv              = n_sample_invert
+    self._Nsamples          = n_samples
     self._outDist           = output_distribution
     self.default_to_inverse = default_to_inverse
     self.numpy_dtype        = numpy_dtype 
+    self.verbose            = verbose 
+    self.decorrelate        = decorrelate
 
     self.fwdTransforms_ = [] 
     self.bwdTransforms_ = [] 
-    
+
+    self.mean_transformed     = None
+    self.covariance_matrix    = None
+    self.inverse_covmat       = None       
+
     tf.keras.layers.Layer.__init__ ( self, kwargs ) 
 
   def fit ( self, X, y = None ): 
@@ -76,6 +89,20 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
     else:
       raise ValueError ("Expected a numpy array of rank 1 or 2, got %d"%rank)
 
+    if rank == 2 and self.decorrelate:
+      t = self.fwdTransforms_
+      tX = np.stack([
+        np.interp ( X[:,i], np.linspace(t[i].x_min, t[i].x_max, len(t[i].y_values)), t[i].y_values)
+        for i in range(X.shape[1]) ]) 
+
+      mean   = np.mean ( tX, axis=1 ) 
+      covmat = np.cov ( tX )
+      invcov = np.linalg.inv ( covmat ) 
+
+      self.mean_transformed  = mean.astype(self.numpy_dtype)
+      self.covariance_matrix = sqrtm(covmat).astype(self.numpy_dtype)
+      self.inverse_covmat    = sqrtm(invcov).astype(self.numpy_dtype)
+
     return self 
 
 
@@ -88,53 +115,62 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
       Internal. Creates the interpolator for a single variable 
     """
 
-    ## Fill the histogram 
-    hist, edges = np.histogram ( X, bins = self._Nbins ) 
-    ## Creates the underflow bin 
-    hist = np.concatenate ( [ [0.], hist], axis = 0 ) 
+    y  = np.linspace ( 0, 1, self._Nbins ) 
+    xq = np.quantile ( X, y )
+    if  self._outDist == 'normal' :
+      y = ierf ( np.clip(2.*y - 1.,-0.99999, 0.99999)) * np.sqrt(2)
 
-    ## Computes the cumulative distribution 
-    y = np.cumsum ( hist , dtype=self.numpy_dtype) 
-    y /= y [-1] 
-
-    ## Transform the cumulative distribution to output a 
-    ## normal distribution if requested
-    if self._outDist == 'normal':
-      y = ierf ( np.clip(2.*y - 1.,-0.99, 0.99))  * np.sqrt(2) 
-#      y *= ierf ( np.linspace ( -1+1e-10, 1-1e-10, len ( y ) ) )
-
-    ## Prepares the forward transform
     self.fwdTransforms_ . append (
-      FixedBinInterpolator ( edges[0], edges[-1], y )
-    )
+        FixedBinInterpolator ( xq[0], xq[-1],
+          np.interp ( np.linspace(xq[0], xq[-1], self._Nsamples), xq, y ).astype(self.numpy_dtype)
+          )
+        )
 
-    ## Prepares the backward transform
-    y_axis = np.linspace ( y[0], y[-1], self._Ninv )
+    if self._outDist == 'uniform': 
+      self.bwdTransforms_ . append ( 
+          FixedBinInterpolator ( y[0], y[-1], xq ).astype(self.numpy_dtype)
+        )
+    else: 
+      self.bwdTransforms_ . append ( 
+          FixedBinInterpolator ( y[0], y[-1],
+            np.interp ( np.linspace(y[0], y[-1], self._Nsamples), y, xq ).astype(self.numpy_dtype)
+            )
+          )
 
-    self.bwdTransforms_ . append (
-        FixedBinInterpolator ( y_axis[0], y_axis[-1], 
-        np.interp ( y_axis, y, edges ).astype(self.numpy_dtype), 
-      )
-    )
 
 
-  def transform ( self, X, inverse = False ) : 
+  def transform ( self, X, inverse = False, force_decorrelate = None ) : 
     """
       Apply the tensorflow graph 
     """
     transf = self.bwdTransforms_ if inverse else self.fwdTransforms_
+    rank = len(X.shape) 
+
+    decorrelate = force_decorrelate if force_decorrelate is not None else self.decorrelate
+    if rank != 2: self.decorrelate = decorrelate = False
 
     if not len(transf): 
       raise RuntimeError ( "QuantileTransformTF was not initialized. Run qtf.fit(numpy_dataset)." ) 
 
-    rank = len(X.shape) 
+    if self.verbose:
+      print ("Expected %d columns, got %d." % ( len(transf), X.shape[1]) )
+
+    if inverse and decorrelate:
+      X = tf.matmul ( X, self.covariance_matrix ) + self.mean_transformed  
+
     if rank == 1:
-      return transf[0].apply ( X[:,i] )  
+      tX = transf[0].apply ( X[:,i] )  
     elif rank == 2:
-      return tf.stack ( 
+      tX = tf.stack ( 
         [ transf[i].apply ( X[:,i] ) for i in range(X.shape[1]) ], 
         axis=1
       )
+
+    if not inverse and decorrelate:
+      tX = tf.matmul ( tX - self.mean_transformed , self.inverse_covmat )
+
+    return tX 
+      
 
   def call ( self, X ):
     """
@@ -158,11 +194,15 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
     """
     cfg = tf.keras.layers.Layer.get_config ( self )
     cfg . update ( dict(
-        _Nbins             = self._Nbins                 ,   
-        _Ninv              = self._Ninv                  , 
-        _outDist           = self._outDist               , 
-        numpy_dtype        = str(self.numpy_dtype)       , 
-        default_to_inverse = self.default_to_inverse     ,   
+        _Nbins             = int(self._Nbins)           ,   
+        _Nsamples          = int(self._Nsamples )       , 
+        _outDist           = str(self._outDist)         , 
+        numpy_dtype        = str(np.dtype(self.numpy_dtype).name) , 
+        default_to_inverse = bool(self.default_to_inverse) ,   
+        decorrelate        = bool(self.decorrelate), 
+        mean_transformed   = self.mean_transformed.tolist(),
+        covariance_matrix  = self.covariance_matrix.tolist(),
+        inverse_covmat     = self.inverse_covmat.tolist(), 
         direct_transforms  = [
           transform.get_config() for transform in self.fwdTransforms_
         ],
@@ -180,9 +220,13 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
     """
     newLayer = FastQuantileLayer() 
     newLayer._Nbins               = cfg [ '_Nbins' ] 
-    newLayer._Ninv                = cfg [ '_Ninv' ] 
+    newLayer._Nsamples            = cfg [ '_Nsamples' ] 
     newLayer.numpy_dtype          = cfg [ 'numpy_dtype'] 
     newLayer.default_to_inverse   = cfg [ 'default_to_inverse' ] 
+    newLayer.decorrelate          = cfg [ 'decorrelate' ], 
+    newLayer.mean_transformed     = np.array(cfg [ 'mean_transformed' ]).astype(newLayer.numpy_dtype) 
+    newLayer.covariance_matrix    = np.array(cfg [ 'covariance_matrix' ]).astype(newLayer.numpy_dtype)
+    newLayer.inverse_covmat       = np.array(cfg [ 'inverse_covmat' ]).astype(newLayer.numpy_dtype)
     newLayer.fwdTransforms_       = [] 
     newLayer.bwdTransforms_       = [] 
     
@@ -200,24 +244,30 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
     return newLayer
 
 
+  def compute_output_shape ( self, input_shape ):
+    return input_shape
 
 
 
 if __name__ == '__main__':
   dataset = np.c_[
     np.random.uniform ( 0., 1., 1000) , 
-    np.random.uniform ( 2., 3., 1000) , 
+    np.random.uniform ( -5., 50., 1000) , 
   ]
+  th = np.pi / 5. 
+  rotmat = np.array([[np.cos(th),np.sin(th)],[-np.sin(th),np.cos(th)]])
+  dataset = np.matmul ( dataset, rotmat ) 
 
-  transformer = FastQuantileLayer (dataset.shape[1], output_distribution='normal')
+  transformer = FastQuantileLayer (output_distribution='normal', decorrelate=True)
   transformer . fit ( dataset ) 
 
   transformer . from_config ( transformer.get_config() ) 
 
-  test_dataset = tf.constant(np.c_[
-    np.random.uniform ( 0., 1., 10000) , 
-    np.random.uniform ( 2., 3., 10000) , 
-  ], dtype = tf.float32)
+  test_dataset = tf.constant(
+    np.matmul ( np.c_[
+      np.random.uniform ( 0., 1., 10000) , 
+      np.random.uniform ( -5, 50., 10000) , 
+    ],rotmat), dtype = tf.float32)
 
   t = transformer . transform ( test_dataset ) 
 
@@ -231,6 +281,7 @@ if __name__ == '__main__':
     print ("###### Forward transform ####### " ) 
     print ("Mean:", np.mean((t.eval()), axis= 0))
     print ("Std: ", np.std ((t.eval()), axis= 0))
+    print ("CovMat: ", np.cov ( t.eval(), rowvar = False ) )
     print () 
     print ("###### Backward transform ####### " ) 
     print ("Mean: ", np.mean ( bkwd.eval() , axis= 0) ) 
@@ -239,7 +290,7 @@ if __name__ == '__main__':
     print ("Average squared error: ", np.sqrt(np.mean ( np.square ( test_dataset.eval() - bkwd.eval() ) ))) 
     print ("Max.    squared error: ", np.sqrt(np.max  ( np.square ( test_dataset.eval() - bkwd.eval() ) ))) 
     cmpr = np.c_[test_dataset.eval(), t.eval(),  bkwd.eval()] 
-    error = np.abs(cmpr[:,0]-cmpr[:,1]) 
+    error = np.abs(cmpr[:,0]-cmpr[:,4]) 
 
     print ( "Largest errors: " ) 
     print (cmpr [np.argsort(-error)][:10] ) 

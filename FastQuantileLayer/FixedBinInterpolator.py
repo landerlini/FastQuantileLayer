@@ -39,10 +39,10 @@ class FixedBinInterpolator:
       Return a dictionary including the configuration. 
     """
     return dict (
-        y_values  = list ( self.y_values ) ,
-        x_min     = self.x_min,
-        x_max     = self.x_max,
-        eps       = self.eps, 
+        y_values  = list([float (v) for v in self.y_values]),
+        x_min     = float ( self.x_min ),
+        x_max     = float ( self.x_max ),
+        eps       = float ( self.eps ), 
         dtype     = str(self.dtype), 
       )
     return ret 
@@ -68,8 +68,7 @@ class FixedBinInterpolator:
     x_0f = tf.floor ( x_id )
     x_0 = tf.cast ( x_0f , tf.int64 ) 
 
-    x_0 = tf.where ( x_0 < 0,   tf.zeros_like ( x_0 ) , x_0 )
-    x_0 = tf.where ( x_0 > N-2, tf.ones_like ( x_0 ) * (N-2), x_0 )
+    x_0 = tf.clip_by_value ( x_0, 0, N-2 )
     x_1 = x_0 + 1 
 
 
@@ -77,7 +76,7 @@ class FixedBinInterpolator:
     y_1 = tf.gather ( self.tf_y_values, tf.cast(x_1, tf.int64) ) 
 
 #    y = y_0 + (x_id - x_0f) / (x_1 - x_0 + self.tf_eps) * (y_1 - y_0)
-    y = y_0 + (x_id - x_0f) * (y_1 - y_0)
+    y = y_0 + tf.clip_by_value(x_id - x_0f,0,1) * (y_1 - y_0)
 
     return tf.identity ( y, 'interpolated' ) 
 
