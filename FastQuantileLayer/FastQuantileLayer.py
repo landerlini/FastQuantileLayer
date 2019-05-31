@@ -68,9 +68,9 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
     self.fwdTransforms_ = [] 
     self.bwdTransforms_ = [] 
 
-    self.mean_transformed     = None
-    self.covariance_matrix    = None
-    self.inverse_covmat       = None       
+    self.mean_transformed     = np.array([])
+    self.covariance_matrix    = np.array([])
+    self.inverse_covmat       = np.array([])       
 
     tf.keras.layers.Layer.__init__ ( self, kwargs ) 
 
@@ -223,7 +223,7 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
     newLayer._Nsamples            = cfg [ '_Nsamples' ] 
     newLayer.numpy_dtype          = cfg [ 'numpy_dtype'] 
     newLayer.default_to_inverse   = cfg [ 'default_to_inverse' ] 
-    newLayer.decorrelate          = cfg [ 'decorrelate' ], 
+    newLayer.decorrelate          = bool(cfg [ 'decorrelate' ])
     newLayer.mean_transformed     = np.array(cfg [ 'mean_transformed' ]).astype(newLayer.numpy_dtype) 
     newLayer.covariance_matrix    = np.array(cfg [ 'covariance_matrix' ]).astype(newLayer.numpy_dtype)
     newLayer.inverse_covmat       = np.array(cfg [ 'inverse_covmat' ]).astype(newLayer.numpy_dtype)
@@ -241,6 +241,7 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
         FixedBinInterpolator ( transform['x_min'], transform['x_max'], 
           np.array(transform['y_values'], dtype=transform ['dtype'] ))
       )
+
     return newLayer
 
 
@@ -271,7 +272,7 @@ if __name__ == '__main__':
 
   t = transformer . transform ( test_dataset ) 
 
-  bkwd = transformer . transform ( t, inverse=True ) 
+  bkwd = transformer . get_inverse() . transform ( t )
 
   with tf.Session() as session: 
     print ("###### Original dataset ####### " ) 
