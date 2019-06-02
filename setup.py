@@ -6,7 +6,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
      name='FastQuantileLayer',  
-     version='0.2',
+     version='0.2.1',
      scripts=[] ,
      author="Lucio Anderlini",
      author_email="l.anderlini@gmail.com",

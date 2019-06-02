@@ -128,7 +128,7 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
 
     if self._outDist == 'uniform': 
       self.bwdTransforms_ . append ( 
-          FixedBinInterpolator ( y[0], y[-1], xq ).astype(self.numpy_dtype)
+          FixedBinInterpolator ( y[0], y[-1], xq.astype(self.numpy_dtype) )
         )
     else: 
       self.bwdTransforms_ . append ( 
@@ -143,6 +143,9 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
     """
       Apply the tensorflow graph 
     """
+    if self.default_to_inverse:
+      inverse = not inverse
+
     transf = self.bwdTransforms_ if inverse else self.fwdTransforms_
     rank = len(X.shape) 
 
@@ -176,7 +179,7 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
     """
       Service function to call transform 
     """
-    return self.transform ( X, self.default_to_inverse ) 
+    return self.transform ( X )
 
   
   def get_inverse ( self ):
@@ -259,7 +262,7 @@ if __name__ == '__main__':
   rotmat = np.array([[np.cos(th),np.sin(th)],[-np.sin(th),np.cos(th)]])
   dataset = np.matmul ( dataset, rotmat ) 
 
-  transformer = FastQuantileLayer (output_distribution='normal', decorrelate=True)
+  transformer = FastQuantileLayer (output_distribution='normal', decorrelate=False)
   transformer . fit ( dataset ) 
 
   transformer . from_config ( transformer.get_config() ) 

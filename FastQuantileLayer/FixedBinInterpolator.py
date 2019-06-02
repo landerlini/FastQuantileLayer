@@ -75,7 +75,6 @@ class FixedBinInterpolator:
     y_0 = tf.gather ( self.tf_y_values, tf.cast(x_0, tf.int64) ) 
     y_1 = tf.gather ( self.tf_y_values, tf.cast(x_1, tf.int64) ) 
 
-#    y = y_0 + (x_id - x_0f) / (x_1 - x_0 + self.tf_eps) * (y_1 - y_0)
     y = y_0 + tf.clip_by_value(x_id - x_0f,0,1) * (y_1 - y_0)
 
     return tf.identity ( y, 'interpolated' ) 
