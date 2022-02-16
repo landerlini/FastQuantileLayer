@@ -72,7 +72,7 @@ class FastQuantileLayer ( tf.keras.layers.Layer ) :
     self.covariance_matrix    = np.array([])
     self.inverse_covmat       = np.array([])       
 
-    tf.keras.layers.Layer.__init__ ( self, kwargs ) 
+    tf.keras.layers.Layer.__init__ ( self, **kwargs ) 
 
   def fit ( self, X, y = None ): 
     """
